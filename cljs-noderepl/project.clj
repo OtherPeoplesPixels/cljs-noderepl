@@ -7,11 +7,10 @@
                  [org.clojure/clojurescript "0.0-1576"]
                  [cheshire "5.0.1"]
                  [com.cemerick/piggieback "0.0.4"]]
-  :plugins [[lein-cljsbuild "0.2.10"]]
+  :plugins [[lein-cljsbuild "0.3.0"]]
   :source-paths ["src/clj"]
-  :cljsbuild {:builds [{:src-path "src/cljs"
-                        :compiler {:ouput-dir "out"
-                                   :optimizations :simple
+  :cljsbuild {:builds [{:source-paths ["src/cljs"]
+                        :compiler {:optimizations :simple
                                    :pretty-print true
                                    :target :nodejs}}]}
   :hooks [leiningen.cljsbuild]
