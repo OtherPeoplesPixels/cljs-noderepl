@@ -7,4 +7,12 @@
                  [org.clojure/clojurescript "0.0-1576"]
                  [cheshire "5.0.1"]
                  [com.cemerick/piggieback "0.0.4"]]
+  :plugins [[lein-cljsbuild "0.2.10"]]
+  :source-paths ["src/clj"]
+  :cljsbuild {:builds [{:src-path "src/cljs"
+                        :compiler {:ouput-dir "out"
+                                   :optimizations :simple
+                                   :pretty-print true
+                                   :target :nodejs}}]}
+  :hooks [leiningen.cljsbuild]
   :repl-options {:nrepl-middleware [cemerick.piggieback/wrap-cljs-repl]})
