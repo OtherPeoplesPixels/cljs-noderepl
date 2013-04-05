@@ -10,8 +10,10 @@
   :plugins [[lein-cljsbuild "0.3.0"]]
   :source-paths ["src/clj"]
   :cljsbuild {:builds [{:source-paths ["src/cljs"]
-                        :compiler {:optimizations :simple
+                        :compiler {:output-to "node_repl.js"
+                                   :output-dir "out"
+                                   :optimizations :simple
                                    :pretty-print true
                                    :target :nodejs}}]}
-  :hooks [leiningen.cljsbuild]
+  ;;:hooks [leiningen.cljsbuild]
   :repl-options {:nrepl-middleware [cemerick.piggieback/wrap-cljs-repl]})

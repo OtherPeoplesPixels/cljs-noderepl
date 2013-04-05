@@ -1,69 +1,27 @@
 (ns cljs.repl.node
   (:require [clojure.string :as string]
             [clojure.java.io :as io]
+            [cljs.closure :as cljsc]
             [cljs.analyzer :as ana]
             [cljs.repl :as repl]
             [cheshire.core :refer [parse-string generate-string]]
             [cemerick.piggieback :as piggieback])
   (:import cljs.repl.IJavaScriptEnv
+           java.net.Socket
            java.io.PipedReader
            java.io.PipedWriter))
 
-(defn- load-as-tempfile
-  "Copy a file from the classpath into a temporary file.
-  Return the path to the temporary file."
-  [filename]
-  (let [tempfile (java.io.File/createTempFile "cljsrepl" ".js")
-        resource (io/resource filename)]
-    (.deleteOnExit tempfile)
-    (assert resource (str "Can't find " filename " in classpath"))
-    (with-open [in (io/input-stream resource)
-                out (io/output-stream tempfile)]
-      (io/copy in out))
-    (.getAbsolutePath tempfile)))
-
-(defn- output-filter
-  "Take a reader and wrap a filter around it which swallows and
-  acts on output events from the subprocess. Keep the filter
-  thread running until alive-func returns false."
-  [reader alive-func]
-  (let [pipe (PipedWriter.)]
-    (future
-      (while (alive-func)
-        (let [line (.readLine reader)
-              data (parse-string line)]
-          (if-let [output (get data "output")]
-            (print output)
-            (doto pipe
-              (.write (str line "\n"))
-              (.flush))))))
-    (io/reader (PipedReader. pipe))))
-
-(defn- process-alive?
-  "Test if a process is still running."
-  [^Process process]
-  (try (.exitValue process) false
-       (catch IllegalThreadStateException e true)))
-
-(defn- launch-node-process
-  "Launch the Node subprocess."
-  []
-  ;; Launch repl.js through an eval to trick Node into thinking it was
-  ;; started from the current directory, allowing require() to work as
-  ;; expected.
-  (let [launch-script
-        (str "eval(require('fs').readFileSync('"
-             (string/replace (load-as-tempfile "cljs/repl/node_repl.js") "\\" "/")
-             "','utf8'))")
-        process (let [pb (ProcessBuilder. ["node" "-e" launch-script])]
-                  (.start pb))]
-    {:process process
-     :input (output-filter (io/reader (.getInputStream process)) #(process-alive? process))
-     :output (io/writer (.getOutputStream process))
+(defn- repl-socket
+  "Create new repl connected socket."
+  [host port]
+  (let [socket (Socket. host port)]
+    {:socket socket
+     :input  (io/reader (.getInputStream socket))
+     :output (io/writer (.getOutputStream socket))
      :loaded-libs (atom #{})}))
 
-(defn js-eval [env filename line code]
-  (let [{:keys [input output]} env]
+(defn js-eval [repl-env filename line code]
+  (let [{:keys [input output]} repl-env]
     (.write output (str (generate-string {:file filename :line line :code code})
                         "\n"))
     (.flush output)
@@ -72,8 +30,10 @@
 
 (defn node-setup [repl-env]
   (let [env (ana/empty-env)]
-    (repl/load-file repl-env "cljs/core.cljs")
-    (swap! (:loaded-libs repl-env) conj "cljs.core")
+    ;;(repl/load-file repl-env "cljs/core.cljs")
+    ;;(swap! (:loaded-libs repl-env) conj "cljs.core")
+    (repl/evaluate-form repl-env env "<cljs repl>"
+                        '(js* "cljs.user = {}"))
     (repl/evaluate-form repl-env env "<cljs repl>"
                         '(ns cljs.user))
     (repl/evaluate-form repl-env env "<cljs repl>"
@@ -92,10 +52,8 @@
       (swap! (:loaded-libs repl-env) (partial apply conj) missing))))
 
 (defn node-tear-down [repl-env]
-  (let [process (:process repl-env)]
-    (doto process
-      (.destroy)
-      (.waitFor))))
+  (let [socket (:socket repl-env)]
+    (doto socket (.close))))
 
 (defn load-resource
   "Load a JS file from the classpath into the REPL environment."
@@ -115,26 +73,38 @@
   (-tear-down [this]
     (node-tear-down this)))
 
+(defn- provides-and-requires
+  "Return a flat list of all provided and required namespaces from a
+  sequence of IJavaScripts."
+  [deps]
+  (flatten (mapcat (juxt :provides :requires) deps)))
+
+(defn- always-preloaded
+  "Return a list of all namespaces which are always preloaded by the node REPL."
+  []
+  (let [cljs (provides-and-requires (cljsc/cljs-dependencies {:libs ["out/clojure/node"]} ["clojure.node.repl"]))
+        goog (provides-and-requires (cljsc/js-dependencies {} cljs))]
+    (disj (set (concat cljs goog)) nil)))
+
 (defn repl-env
-  "Create a Node.js REPL environment."
-  [& {:as opts}]
-  (let [base (io/resource "goog/base.js")
-        deps (io/resource "goog/deps.js")
-        process (launch-node-process)
-        new-repl-env (merge (NodeEnv.)
-                            (merge process
-                                   {:optimizations :simple}))]
-    (assert base "Can't find goog/base.js in classpath")
-    (assert deps "Can't find goog/deps.js in classpath")
-    (load-resource new-repl-env "goog/base.js")
-    (load-resource new-repl-env "goog/deps.js")
+  "Create a Node.js REPL environment.
+
+  Options [default]:
+    :host - The host to connect to. [localhost]
+    :port - The port to connect on. [rand]"
+  [{:keys [host port] :or {host "localhost"} :as opts}]
+  (let [new-repl-env (merge (NodeEnv.)
+                            (repl-socket host port)
+                            {:optimizations :simple})]
+    ;;(reset! (:loaded-libs new-repl-env) (always-preloaded))
+    (reset! (:loaded-libs new-repl-env) #{"cljs.core"})
     new-repl-env))
 
-(defn run-node-repl []
-  (repl/repl (repl-env)))
+(defn run-node-repl [opts]
+  (repl/repl (repl-env opts)))
 
-(defn nrepl-env []
-  (doto (repl-env) (node-setup)))
+(defn nrepl-env [opts]
+  (doto (repl-env opts) (node-setup)))
 
-(defn run-node-nrepl []
-  (piggieback/cljs-repl :repl-env (nrepl-env)))
+(defn run-node-nrepl [opts]
+  (piggieback/cljs-repl :repl-env (nrepl-env opts)))
