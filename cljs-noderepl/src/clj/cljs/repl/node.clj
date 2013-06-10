@@ -11,14 +11,13 @@
            java.io.PipedReader
            java.io.PipedWriter))
 
-(defn- repl-socket
+(defn repl-socket
   "Create new repl connected socket."
-  [host port]
+  [{:keys [host port]}]
   (let [socket (Socket. host port)]
     {:socket socket
      :input  (io/reader (.getInputStream socket))
-     :output (io/writer (.getOutputStream socket))
-     :loaded-libs (atom #{})}))
+     :output (io/writer (.getOutputStream socket))}))
 
 (defn js-eval [repl-env filename line code]
   (let [{:keys [input output]} repl-env]
@@ -28,16 +27,19 @@
     (let [result-string (.readLine input)]
       (parse-string result-string true))))
 
+(defn load-resource
+  "Load a JS file from the classpath into the REPL repl-environment."
+  [repl-env filename]
+  (let [resource (io/resource filename)]
+    (assert resource (str "Can't find " filename " in classpath"))
+    (js-eval repl-env filename 1 (slurp resource))))
+
 (defn node-setup [repl-env]
   (let [env (ana/empty-env)]
-    ;;(repl/load-file repl-env "cljs/core.cljs")
-    ;;(swap! (:loaded-libs repl-env) conj "cljs.core")
-    (repl/evaluate-form repl-env env "<cljs repl>"
-                        '(js* "cljs.user = {}"))
-    (repl/evaluate-form repl-env env "<cljs repl>"
-                        '(ns cljs.user))
-    (repl/evaluate-form repl-env env "<cljs repl>"
-                        '(set! cljs.core/*print-fn* (.-print (js/require "util"))))))
+    (do (repl/load-file repl-env "cljs/core.cljs")
+        (swap! (:loaded-libs repl-env) conj "cljs.core"))
+    (repl/evaluate-form repl-env env "<cljs repl>" '(ns cljs.user))
+    (repl/evaluate-form repl-env env "<cljs repl>" '(set! cljs.core/*print-fn* (.-print (js/require "util"))))))
 
 (defn node-eval [repl-env filename line js]
   (let [result (js-eval repl-env filename line js)]
@@ -55,13 +57,6 @@
   (let [socket (:socket repl-env)]
     (doto socket (.close))))
 
-(defn load-resource
-  "Load a JS file from the classpath into the REPL environment."
-  [env filename]
-  (let [resource (io/resource filename)]
-    (assert resource (str "Can't find " filename " in classpath"))
-    (js-eval env filename 1 (slurp resource))))
-
 (defrecord NodeEnv []
   repl/IJavaScriptEnv
   (-setup [this]
@@ -73,31 +68,21 @@
   (-tear-down [this]
     (node-tear-down this)))
 
-(defn- provides-and-requires
-  "Return a flat list of all provided and required namespaces from a
-  sequence of IJavaScripts."
-  [deps]
-  (flatten (mapcat (juxt :provides :requires) deps)))
-
-(defn- always-preloaded
-  "Return a list of all namespaces which are always preloaded by the node REPL."
-  []
-  (let [cljs (provides-and-requires (cljsc/cljs-dependencies {:libs ["out/clojure/node"]} ["clojure.node.repl"]))
-        goog (provides-and-requires (cljsc/js-dependencies {} cljs))]
-    (disj (set (concat cljs goog)) nil)))
-
 (defn repl-env
   "Create a Node.js REPL environment.
 
   Options [default]:
-    :host - The host to connect to. [localhost]
-    :port - The port to connect on. [rand]"
-  [{:keys [host port] :or {host "localhost"} :as opts}]
-  (let [new-repl-env (merge (NodeEnv.)
-                            (repl-socket host port)
-                            {:optimizations :simple})]
-    ;;(reset! (:loaded-libs new-repl-env) (always-preloaded))
-    (reset! (:loaded-libs new-repl-env) #{"cljs.core"})
+    :host - The host to connect to [localhost]
+    :port - The port to connect on [9000]"
+  [{:keys [host port] :or {host "localhost" port 9000} :as opts}]
+  (let [opts (assoc opts :host host :port port) ; delete if unecessary
+        new-repl-env (merge (NodeEnv.)
+                            {:optimizations :simple
+                             :loaded-libs (atom #{})}
+                            (repl-socket opts)
+                            opts)]
+    (load-resource new-repl-env "goog/base.js")
+    (load-resource new-repl-env "goog/deps.js")
     new-repl-env))
 
 (defn run-node-repl [opts]

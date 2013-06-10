@@ -17,44 +17,48 @@
    "Int16Array" "Uint16Array" "Int32Array" "Uint32Array"
    "Float32Array" "Float64Array"])
 
-(defn ^:internal build-sandbox []
+(defn ^:internal build-sandbox [& [init]]
   (let [sandbox (js/Object.)]
     (doseq [prop sandbox-properties]
       ;; no need to check .hasOwnProperty
       (aset sandbox prop (aget js/global prop)))
     (doto sandbox
-      (aset "goog" js/goog)
-      (aset "cljs" js/cljs)
       (aset "require" js/require)
-      (aset "global" sandbox) ;global aliases
-      ;;(aset "GLOBAL" sandbox)
-      ;;(aset "root" sandbox)
-      ;;(aset "this" sandbox)
-      ;;(aset "_" sandbox)
-     )))
+      ;; global aliases
+      (aset "global" sandbox)
+      (aset "GLOBAL" sandbox)
+      (aset "root" sandbox)
+      (aset "this" sandbox)
+      (aset "_" sandbox))
+    (doseq [prop (.keys js/Object init)]
+      (when (.hasOwnProperty init prop)
+        (aset sandbox prop (aget init prop))))
+    sandbox))
+
+(defn ^:internal read-line [data]
+  (let [i (.indexOf data "\n")]
+    (when (> i 0)
+      (.slice data 0 (+ 1 i)))))
 
 (defn ^:internal repl-data-fn
   "Returns a nodejs Stream 'data' event handler which recieves and parses JSON,
   evals js code, and handles the result using the provided result and error
   callback functions."
-  [result-fn error-fn]
-  (let [context (.createContext vm (build-sandbox))
+  [init result-fn error-fn]
+  (let [context (.createContext vm (build-sandbox init))
         buffer (atom "")]
     (fn [data]
       (swap! buffer str data)
-      (when-let [line (re-find #"[^\n]*\n" @buffer)]
+      (when-let [line (read-line @buffer)]
         (swap! buffer #(.slice % (count line)))
-        (try*
-         (let [json (.parse js/JSON line)
-               file (aget json "file")
-               code (aget json "code")]
-           (if (and (string? code) (string? file))
-             (try*
-              (result-fn (.runInContext vm code context file))
-              ;;(result-fn (.runInThisContext vm code file))
-              (catch e (error-fn e)))
-             (error-fn (cljs-format-error))))
-         (catch e (error-fn (cljs-parse-error))))))))
+        (try* (let [json (.parse js/JSON line)
+                    file (aget json "file")
+                    code (aget json "code")]
+                (if (and (string? code) (string? file))
+                  (try* (result-fn (.runInContext vm code context file))
+                        (catch e (error-fn e)))
+                  (error-fn (cljs-format-error))))
+              (catch e (error-fn (cljs-parse-error))))))))
 
 (defn ^:internal encode [data]
   (.stringify js/JSON (clj->js data)))
@@ -63,7 +67,7 @@
   (js->clj (.parse js/JSON data)))
 
 ;; TODO: handle 'error' and 'end' events
-(defn ^:internal init-repl [stream]
+(defn ^:internal init-repl [init stream]
   (assert stream (str "expected a stream!"))
   (let [write-fn  #(.write stream (str % "\n"))
         result-fn #(write-fn (encode {:result %}))
@@ -73,7 +77,8 @@
                      (write-fn (encode {:error {:name name :message message :stack stack}})))]
     (doto stream
       (.setEncoding "utf-8")
-      (.on "data" (repl-data-fn result-fn error-fn))
+      (.setKeepAlive true)
+      (.on "data" (repl-data-fn init result-fn error-fn))
       ;;(.on "end" ...)
       ;;(.on "error" error-fn)
       ;;(.on "close" #(result-fn "Socket closed"))
@@ -91,10 +96,9 @@
   "Connects to a REPL server from an nodejs application. After the connection is
   made, the REPL will evaluate forms in the context of the node vm that called
   this function. Returns the connected Stream object or throws an exception."
-  [& [port host]]
-  (let [server (.createServer net init-repl)]
-    (.listen server (or port 0) (or host "localhost") (partial repl-greeting server))
+  [& [port host init]]
+  (let [server (.createServer net (partial init-repl init))
+        host (or host "localhost")
+        port (or port 0)]
+    (.listen server port host (partial repl-greeting server))
     server))
-
-;; DEBUG!!!
-(set! *main-cli-fn* connect)
